@@ -1,0 +1,22 @@
+node_modules
+.next
+.env*.local
+.env
+.vercel
+.DS_Store
+*.log
+coverage
+dist
+build
+12345
+12345.pub
+*.pem
+*.key
+backend/.venv/
+backend/**/__pycache__/
+*.py[cod]
+*.tsbuildinfo
+# Local development user store for built-in auth starter
+data/users.json
+data/portfolios.json
+data/watchlists.json
