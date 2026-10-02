@@ -67,7 +67,7 @@ export interface FrontierPoint extends PortfolioMetrics {
 
 export interface OptimizerResponse {
   generatedAt: string;
-  dataSource: 'coingecko' | 'synthetic-fallback' | 'mixed';
+  dataSource: 'coingecko';
   assets: MarketAsset[];
   allocations: Allocation[];
   metrics: PortfolioMetrics;

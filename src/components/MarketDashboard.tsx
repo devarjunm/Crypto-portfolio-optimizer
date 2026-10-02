@@ -41,19 +41,16 @@ type MarketOverview = {
   source: string;
   global: {
     activeCryptocurrencies: number;
-    totalMarketCapUsd: number;
-    totalVolumeUsd: number;
-    btcDominance: number;
+    totalMarketCapUsd: number | null;
+    totalVolumeUsd: number | null;
+    btcDominance: number | null;
   };
-  fearGreed: {
-    value: number;
-    classification: string;
-    source: string;
-  };
+  fearGreed: null | { value: number; classification: string; source: string };
   markets: MarketCoin[];
   topGainers: MarketCoin[];
   topLosers: MarketCoin[];
   trending: TrendingCoin[];
+  warnings?: string[];
 };
 
 
@@ -69,8 +66,12 @@ export default function MarketDashboard({ currency }: { currency: CurrencyCode }
   useEffect(() => {
     let active = true;
     apiFetch('/api/market/overview')
-      .then((response) => response.json())
-      .then((data: MarketOverview) => {
+      .then(async (response) => {
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error ?? 'Live market data is temporarily unavailable. Please try again.');
+        return data as MarketOverview;
+      })
+      .then((data) => {
         if (!active) return;
         setOverview(data);
         setError('');
@@ -94,8 +95,12 @@ export default function MarketDashboard({ currency }: { currency: CurrencyCode }
     setSearching(true);
     try {
       const response = await apiFetch(`/api/coins/search?q=${encodeURIComponent(query.trim())}`);
-      const data = await response.json() as { coins?: SearchCoin[] };
+      const data = await response.json() as { coins?: SearchCoin[]; error?: string };
+      if (!response.ok) throw new Error(data.error ?? 'Unable to search CoinGecko right now.');
       setSearchResults(data.coins ?? []);
+    } catch {
+      setSearchResults([]);
+      setError('Live coin search is temporarily unavailable. Please try again.');
     } finally {
       setSearching(false);
     }
@@ -111,8 +116,8 @@ export default function MarketDashboard({ currency }: { currency: CurrencyCode }
         <div>
           <h2 id="market-title">Live market dashboard</h2>
           <p>
-            Track crypto prices, market cap, volume, trending coins, top gainers, top losers, BTC dominance,
-            Fear & Greed Index, and search for any coin.
+            Track CoinGecko crypto prices, market cap, volume, trending coins, top gainers and losers,
+            BTC dominance, and search for any coin.
           </p>
         </div>
         <span className="pill" aria-live="polite">
@@ -121,6 +126,7 @@ export default function MarketDashboard({ currency }: { currency: CurrencyCode }
       </div>
 
       {error && <div className="notice error" role="alert">{error}</div>}
+      {overview?.warnings?.map((warning) => <div className="notice" role="status" key={warning}>{warning}</div>)}
 
       <form className="market-search panel" onSubmit={handleSearch} role="search" aria-label="Search cryptocurrency">
         <label className="search-label">
@@ -141,7 +147,7 @@ export default function MarketDashboard({ currency }: { currency: CurrencyCode }
         <div className="search-results panel" aria-label="Coin search results">
           {searchResults.map((coin) => (
             <a key={coin.id} href={`/coin/${coin.id}`} className="search-result-card">
-              {coin.thumb || coin.large ? <img src={coin.thumb || coin.large} alt="" /> : <span className="coin-fallback">{coin.symbol?.slice(0, 2)}</span>}
+              {coin.thumb || coin.large ? <img src={coin.thumb || coin.large} alt="" /> : <span className="coin-initials">{coin.symbol?.slice(0, 2)}</span>}
               <span><strong>{coin.name}</strong><small>{coin.symbol?.toUpperCase()} · Rank #{coin.market_cap_rank ?? '—'}</small></span>
             </a>
           ))}
@@ -153,10 +159,10 @@ export default function MarketDashboard({ currency }: { currency: CurrencyCode }
       {overview && (
         <>
           <div className="market-stats">
-            <MarketStat label="Market Cap" value={formatCurrency(overview.global.totalMarketCapUsd, currency, true)} />
-            <MarketStat label="24h Volume" value={formatCurrency(overview.global.totalVolumeUsd, currency, true)} />
-            <MarketStat label="BTC Dominance" value={`${overview.global.btcDominance.toFixed(1)}%`} />
-            <MarketStat label="Fear & Greed" value={`${overview.fearGreed.value}/100`} detail={overview.fearGreed.classification} />
+            <MarketStat label="Market Cap" value={overview.global.totalMarketCapUsd === null ? 'Unavailable' : formatCurrency(overview.global.totalMarketCapUsd, currency, true)} />
+            <MarketStat label="24h Volume" value={overview.global.totalVolumeUsd === null ? 'Unavailable' : formatCurrency(overview.global.totalVolumeUsd, currency, true)} />
+            <MarketStat label="BTC Dominance" value={overview.global.btcDominance === null ? 'Unavailable' : `${overview.global.btcDominance.toFixed(1)}%`} />
+            <MarketStat label="Fear & Greed" value="Unavailable" detail="Not provided by CoinGecko" />
           </div>
 
           <div className="market-grid">

@@ -725,7 +725,7 @@ td {
   color: var(--muted);
 }
 
-.coin-fallback {
+.coin-initials {
   width: 28px;
   height: 28px;
   border-radius: 999px;

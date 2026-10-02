@@ -1,7 +1,8 @@
 import secrets
 from datetime import datetime,timezone
 from fastapi import APIRouter,Request,HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from typing import Literal
 from .auth import _user
 from ..services.storage import read,write
 from ..services.coingecko import markets
@@ -25,7 +26,7 @@ async def snapshot(uid):
         a=am.get(x['assetId'],{});price=a.get('currentPrice',0);alerts.append({**x,'symbol':a.get('symbol',x['assetId'].upper()),'name':a.get('name',x['assetId']),'currentPrice':price,'triggered':x['enabled'] and price>0 and (price>=x['targetPrice'] if x['direction']=='above' else price<=x['targetPrice'])})
     return {'generatedAt':datetime.now(timezone.utc).isoformat(),'source':m['source'],'coins':coins,'alerts':alerts}
 class CoinBody(BaseModel):assetId:str
-class AlertBody(BaseModel):assetId:str;direction:str='above';targetPrice:float
+class AlertBody(BaseModel):assetId:str;direction:Literal['above','below']='above';targetPrice:float=Field(gt=0,le=1e9,allow_inf_nan=False)
 @router.get('/api/watchlist')
 async def get_watch(request:Request):u=await current(request);return await snapshot(u['id'])
 @router.post('/api/watchlist')
@@ -39,7 +40,6 @@ async def remove_watch(request:Request,assetId:str=''):
 @router.post('/api/watchlist/alerts')
 async def add_alert(request:Request,b:AlertBody):
     u=await current(request);i=aid(b.assetId)
-    if b.direction not in ('above','below') or b.targetPrice<=0 or b.targetPrice>1e9:raise HTTPException(400,'Alert target price must be positive.')
     w=await raw(u['id']);w['coins']=list(dict.fromkeys(w['coins']+[i]));w['alerts'].insert(0,{'id':secrets.token_hex(10),'assetId':i,'direction':b.direction,'targetPrice':b.targetPrice,'enabled':True,'createdAt':datetime.now(timezone.utc).isoformat()});s=await read('watchlists.json',{});s[u['id']]=w;await write('watchlists.json',s);return await snapshot(u['id'])
 @router.delete('/api/watchlist/alerts')
 async def delete_alert(request:Request,alertId:str=''):

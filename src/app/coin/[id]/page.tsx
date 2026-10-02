@@ -2,7 +2,8 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { useParams } from 'next/navigation';
-import { formatCurrency, type CurrencyCode, USD_TO_INR } from '@/lib/currency';
+import Link from 'next/link';
+import { formatCurrency, setUsdToInrRate, type CurrencyCode } from '@/lib/currency';
 import { apiFetch } from '@/lib/api';
 
 type PricePoint = { date: string; price: number };
@@ -42,10 +43,23 @@ export default function CoinDetailsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [currency, setCurrency] = useState<CurrencyCode>('USD');
+  const [usdToInrRate, setUsdToInrRateState] = useState<number | null>(null);
 
   useEffect(() => {
     const savedCurrency = window.localStorage.getItem('displayCurrency');
-    if (savedCurrency === 'USD' || savedCurrency === 'INR') setCurrency(savedCurrency);
+    if (savedCurrency === 'USD' || savedCurrency === 'INR') {
+      // Hydrate a browser preference after mount; this cannot be read during server rendering.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setCurrency(savedCurrency);
+    }
+    apiFetch('/api/market/fx')
+      .then(async (response) => {
+        const data = await response.json();
+        if (!response.ok || data.source !== 'coingecko' || typeof data.usdToInr !== 'number') throw new Error('Live currency conversion is unavailable.');
+        return data.usdToInr as number;
+      })
+      .then((rate) => { setUsdToInrRate(rate); setUsdToInrRateState(rate); })
+      .catch(() => { setUsdToInrRate(null); setUsdToInrRateState(null); });
   }, []);
 
   function changeCurrency(value: CurrencyCode) {
@@ -57,14 +71,18 @@ export default function CoinDetailsPage() {
     if (!id) return;
     let active = true;
     apiFetch(`/api/coins/${id}`)
-      .then((response) => response.json())
-      .then((data: CoinPayload) => {
+      .then(async (response) => {
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error ?? 'Live market data is temporarily unavailable. Please try again.');
+        return data as CoinPayload;
+      })
+      .then((data) => {
         if (!active) return;
         setPayload(data);
         setError('');
       })
-      .catch(() => {
-        if (active) setError('Unable to load this coin right now.');
+      .catch((caught) => {
+        if (active) setError(caught instanceof Error ? caught.message : 'Live market data is temporarily unavailable. Please try again.');
       })
       .finally(() => {
         if (active) setLoading(false);
@@ -81,7 +99,7 @@ export default function CoinDetailsPage() {
   return (
     <main className="shell coin-page">
       <div className="coin-topbar">
-        <a className="button secondary" href="/">← Back to dashboard</a>
+        <Link className="button secondary" href="/">← Back to dashboard</Link>
         <label className="currency-switch">
           <span>Currency</span>
           <select value={currency} onChange={(event) => changeCurrency(event.target.value as CurrencyCode)} aria-label="Display currency">
@@ -98,7 +116,7 @@ export default function CoinDetailsPage() {
             <div>
               <span className="eyebrow">Rank #{payload.details.market_cap_rank ?? '—'} · Source: {payload.source}</span>
               <h1>{payload.details.name} <span className="gradient-text">{payload.details.symbol?.toUpperCase()}</span></h1>
-              <p className="lede">Live coin details, 30-day history, core market metrics, and a rule-based trend estimate. INR uses estimated $1 ≈ ₹{USD_TO_INR}.</p>
+              <p className="lede">Live coin details, 30-day history, core market metrics, and a rule-based trend estimate.{currency === 'INR' ? ` ${usdToInrRate ? `Live CoinGecko conversion: ₹${usdToInrRate.toFixed(2)} per $1.` : 'Live INR conversion is unavailable.'}` : ''}</p>
             </div>
             {payload.details.image?.large ? <img src={payload.details.image.large} alt="" className="coin-hero-image" /> : null}
           </section>
@@ -118,7 +136,7 @@ export default function CoinDetailsPage() {
             <div className="section-title compact">
               <div>
                 <h2>30-day price chart</h2>
-                <p>Historical price line generated from CoinGecko or fallback demo data.</p>
+                <p>Historical prices from CoinGecko.</p>
               </div>
             </div>
             <LineChart points={payload.history} currency={currency} />

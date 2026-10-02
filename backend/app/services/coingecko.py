@@ -1,94 +1,203 @@
-import os, asyncio, time
-from datetime import datetime, timezone, timedelta
+"""Centralized, validated CoinGecko Demo/Public API client."""
+
+from __future__ import annotations
+
+import logging
+import math
+import os
+import re
+import time
+from datetime import datetime, timezone
+from urllib.parse import quote
+
 import httpx
-from ..assets import SUPPORTED, ASSET_MAP
+from fastapi import HTTPException
 
-BASE = os.getenv('COINGECKO_BASE_URL', 'https://api.coingecko.com/api/v3').rstrip('/')
-_cache = {}
-_client = None
+from ..assets import SUPPORTED
 
-def _headers():
-    key = os.getenv('COINGECKO_API_KEY')
-    return {'x-cg-demo-api-key': key} if key else {}
+logger = logging.getLogger(__name__)
+BASE = os.getenv("COINGECKO_BASE_URL", "https://api.coingecko.com/api/v3").rstrip("/")
+_cache: dict[tuple, tuple[float, object]] = {}
+_client: httpx.AsyncClient | None = None
+LIVE_DATA_ERROR = "Live market data is temporarily unavailable. Please try again."
 
-async def startup():
+
+def _headers() -> dict[str, str]:
+    key = os.getenv("COINGECKO_API_KEY", "").strip()
+    # CoinGecko Demo API keys use x-cg-demo-api-key. Never place this key in the URL.
+    return {"x-cg-demo-api-key": key} if key else {}
+
+
+async def startup() -> None:
     global _client
-    _client = httpx.AsyncClient(timeout=20, headers=_headers())
+    _client = httpx.AsyncClient(timeout=httpx.Timeout(20), headers=_headers())
 
-async def shutdown():
-    if _client:
+
+async def shutdown() -> None:
+    global _client
+    if _client is not None:
         await _client.aclose()
+        _client = None
 
-async def get_json(path, params=None, ttl=90, external=False):
-    key = (path, tuple(sorted((params or {}).items())))
-    cached = _cache.get(key)
+
+async def get_json(path: str, params: dict | None = None, ttl: int = 90):
+    """GET and cache one CoinGecko endpoint response, with sanitized failures."""
+    cache_key = (path, tuple(sorted((params or {}).items())))
     now = time.monotonic()
-    if cached and cached[0] > now: return cached[1]
-    client = _client or httpx.AsyncClient(timeout=20, headers=_headers())
-    close = _client is None
+    cached = _cache.get(cache_key)
+    if cached and cached[0] > now:
+        return cached[1]
+
+    client = _client
+    close_client = client is None
+    if client is None:
+        client = httpx.AsyncClient(timeout=httpx.Timeout(20), headers=_headers())
     try:
-        url = path if external else f'{BASE}{path}'
-        response = await client.get(url, params=params)
-        response.raise_for_status()
-        result = response.json()
-        _cache[key] = (now + ttl, result)
+        response = await client.get(f"{BASE}{path}", params=params)
+        if response.is_error:
+            logger.warning("CoinGecko returned HTTP %s for %s", response.status_code, path)
+            status = 503 if response.status_code == 429 else 502
+            raise HTTPException(status_code=status, detail=LIVE_DATA_ERROR)
+        try:
+            result = response.json()
+        except ValueError as exc:
+            logger.warning("CoinGecko returned malformed JSON for %s", path)
+            raise HTTPException(status_code=502, detail=LIVE_DATA_ERROR) from exc
+        _cache[cache_key] = (now + ttl, result)
         return result
+    except httpx.RequestError as exc:
+        logger.warning("CoinGecko request failed for %s (%s)", path, type(exc).__name__)
+        raise HTTPException(status_code=503, detail=LIVE_DATA_ERROR) from exc
     finally:
-        if close: await client.aclose()
+        if close_client:
+            await client.aclose()
 
-def fallback_asset(asset_id, index=0):
-    return dict(ASSET_MAP.get(asset_id, {'id':asset_id,'symbol':asset_id[:6].upper(),'name':asset_id.replace('-',' ').title(),'currentPrice':0}))
 
-async def markets(ids=None, currency='usd', order='market_cap_desc', per_page=None, page=1):
-    ids = ids or [a['id'] for a in SUPPORTED]
-    params = {'vs_currency':currency,'ids':','.join(ids),'order':order,'per_page':per_page or max(len(ids),1),'page':page,'sparkline':'false','price_change_percentage':'24h'}
-    try:
-        data = await get_json('/coins/markets', params)
-        mapped = {coin['id']:coin for coin in data}
-        return {'assets':[({'id':c['id'],'symbol':c['symbol'].upper(),'name':c['name'],'image':c.get('image'),'currentPrice':c.get('current_price',0),'marketCapRank':c.get('market_cap_rank'),'priceChange24h':c.get('price_change_percentage_24h')} if c['id'] in mapped else fallback_asset(c['id'])) for c in [{'id':i} for i in ids]],'source':'coingecko'}
-    except (httpx.HTTPError, ValueError, KeyError):
-        bases={'bitcoin':64000,'ethereum':3400,'solana':145,'binancecoin':590,'ripple':.54,'cardano':.42,'dogecoin':.12,'chainlink':14.5}
-        return {'assets':[dict(fallback_asset(i),currentPrice=bases.get(i,10+j*7)) for j,i in enumerate(ids)],'source':'synthetic-fallback'}
+def _valid_number(value, *, positive: bool = False) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and (value > 0 if positive else True)
 
-def synthetic_history(asset_id, days=365):
-    import math
-    idx=next((i for i,a in enumerate(SUPPORTED) if a['id']==asset_id),-1)
-    base={'bitcoin':64000,'ethereum':3400,'solana':145,'binancecoin':590,'ripple':.54,'cardano':.42,'dogecoin':.12,'chainlink':14.5}.get(asset_id,10+max(idx,0)*7)
-    beta=.75 if asset_id=='bitcoin' else 1 if asset_id=='ethereum' else 1.25+max(idx,0)*.04
-    drift=.00055+max(idx,0)*.00004; vol=.025*beta
-    today=datetime.now(timezone.utc).date(); price=base/math.exp(drift*days*.25); points=[]
-    for day in range(days,-1,-1):
-        h=2166136261
-        for ch in f'{asset_id}:{day}': h=((h ^ ord(ch))*16777619)&0xffffffff
-        noise=(h/4294967295-.5)*2
-        cyc=math.sin(day/18+beta)*.006+math.cos(day/47)*.004
-        price=max(.000001,price*math.exp(drift+cyc+noise*vol))
-        points.append({'date':(today-timedelta(days=day)).isoformat(),'price':price})
-    return {'id':asset_id,'points':points}
 
-async def history(asset_id, days=365):
-    try:
-        data=await get_json(f'/coins/{asset_id}/market_chart',{'vs_currency':'usd','days':days,'interval':'daily'},1800)
-        bydate={datetime.fromtimestamp(ts/1000,timezone.utc).date().isoformat():price for ts,price in data.get('prices',[]) if price and price>0}
-        points=[{'date':d,'price':p} for d,p in sorted(bydate.items())]
-        if len(points)<60: raise ValueError('Insufficient historical prices')
-        return {'series':{'id':asset_id,'points':points},'source':'coingecko'}
-    except (httpx.HTTPError, ValueError, KeyError, TypeError):
-        return {'series':synthetic_history(asset_id,days),'source':'synthetic-fallback'}
+async def markets(ids: list[str] | None = None, currency: str = "usd", order: str = "market_cap_desc", per_page: int | None = None, page: int = 1):
+    requested_ids = list(dict.fromkeys(ids if ids is not None else [asset["id"] for asset in SUPPORTED]))
+    if not requested_ids:
+        return {"assets": [], "source": "coingecko"}
 
-async def search(query):
-    if len(query.strip())<2:return {'coins':[]}
-    try:
-        data=await get_json('/search',{'query':query.strip()},300)
-        return {'coins':data.get('coins',[])[:12],'source':'coingecko'}
-    except httpx.HTTPError:
-        q=query.lower()
-        return {'coins':[{'id':a['id'],'name':a['name'],'symbol':a['symbol'],'market_cap_rank':a.get('marketCapRank')} for a in SUPPORTED if q in a['id'] or q in a['name'].lower() or q in a['symbol'].lower()],'source':'synthetic-fallback'}
+    params = {
+        "vs_currency": currency.lower(),
+        "ids": ",".join(requested_ids),
+        "order": order,
+        "per_page": per_page or max(len(requested_ids), 1),
+        "page": page,
+        "sparkline": "false",
+        "price_change_percentage": "24h",
+    }
+    data = await get_json("/coins/markets", params)
+    if not isinstance(data, list):
+        raise HTTPException(status_code=502, detail=LIVE_DATA_ERROR)
 
-async def coin_details(asset_id):
-    details, hist=await asyncio.gather(get_json(f'/coins/{asset_id}',{'localization':'false','tickers':'false','market_data':'true','community_data':'false','developer_data':'false','sparkline':'false'},180),history(asset_id,30),return_exceptions=True)
-    if not isinstance(details,Exception):
-        if isinstance(hist,Exception): hist={'series':synthetic_history(asset_id,30),'source':'synthetic-fallback'}
-        return {'details':details,'history':hist['series']['points'],'source':'coingecko' if hist['source']=='coingecko' else 'mixed'}
-    a=fallback_asset(asset_id); points=synthetic_history(asset_id,30)['points']; prices=[p['price'] for p in points]
-    return {'source':'synthetic-fallback','history':points,'details':{'id':asset_id,'symbol':a['symbol'].lower(),'name':a['name'],'market_cap_rank':a.get('marketCapRank'),'market_data':{'current_price':{'usd':prices[-1]},'market_cap':{'usd':0},'total_volume':{'usd':0},'circulating_supply':0,'max_supply':None,'ath':{'usd':max(prices)},'atl':{'usd':min(prices)},'price_change_percentage_24h':0,'price_change_percentage_7d':0,'price_change_percentage_30d':0}}}
+    by_id = {}
+    for coin in data:
+        if not isinstance(coin, dict) or not isinstance(coin.get("id"), str):
+            raise HTTPException(status_code=502, detail=LIVE_DATA_ERROR)
+        price = coin.get("current_price")
+        change_24h = coin.get("price_change_percentage_24h")
+        if (not _valid_number(price, positive=True) or not _valid_number(change_24h)
+                or not coin.get("name") or not coin.get("symbol")):
+            logger.warning("CoinGecko returned an invalid market row for id %s", coin["id"])
+            raise HTTPException(status_code=502, detail=LIVE_DATA_ERROR)
+        by_id[coin["id"]] = coin
+
+    missing = [asset_id for asset_id in requested_ids if asset_id not in by_id]
+    if missing:
+        logger.warning("CoinGecko omitted requested market IDs: %s", ",".join(missing))
+        raise HTTPException(status_code=502, detail=LIVE_DATA_ERROR)
+
+    assets = []
+    for asset_id in requested_ids:
+        coin = by_id[asset_id]
+        assets.append({
+            "id": coin["id"],
+            "symbol": coin["symbol"].upper(),
+            "name": coin["name"],
+            "image": coin.get("image"),
+            "currentPrice": coin["current_price"],
+            "marketCapRank": coin.get("market_cap_rank"),
+            "priceChange24h": change_24h,
+        })
+    return {"assets": assets, "source": "coingecko"}
+
+
+async def history(asset_id: str, days: int = 365):
+    if not re.fullmatch(r"[a-z0-9-]+", asset_id) or not 1 <= days <= 1825:
+        raise HTTPException(status_code=400, detail="Invalid coin ID or history range.")
+    data = await get_json(f"/coins/{quote(asset_id, safe='-')}/market_chart", {"vs_currency": "usd", "days": days, "interval": "daily"}, 1800)
+    raw_prices = data.get("prices") if isinstance(data, dict) else None
+    if not isinstance(raw_prices, list):
+        raise HTTPException(status_code=502, detail=LIVE_DATA_ERROR)
+
+    points_by_date: dict[str, tuple[float, float]] = {}
+    timestamps = set()
+    dates = set()
+    for row in raw_prices:
+        if (not isinstance(row, list) or len(row) != 2 or not _valid_number(row[0])
+                or row[0] < 0 or row[0] > time.time() * 1000 + 86_400_000
+                or not _valid_number(row[1], positive=True)):
+            raise HTTPException(status_code=502, detail=LIVE_DATA_ERROR)
+        timestamp, price = row
+        if timestamp in timestamps:
+            raise HTTPException(status_code=502, detail="CoinGecko returned duplicate history timestamps.")
+        timestamps.add(timestamp)
+        try:
+            date = datetime.fromtimestamp(timestamp / 1000, timezone.utc).date().isoformat()
+        except (OverflowError, OSError, ValueError) as exc:
+            raise HTTPException(status_code=502, detail=LIVE_DATA_ERROR) from exc
+        # CoinGecko may return intraday observations for recent ranges even when
+        # interval=daily is requested. Keep the latest real observation per UTC day.
+        if date not in points_by_date or timestamp > points_by_date[date][0]:
+            points_by_date[date] = (timestamp, float(price))
+
+    points = [{"date": date, "price": item[1]} for date, item in sorted(points_by_date.items())]
+    minimum = max(2, min(60, math.ceil(days * 0.6)))
+    if len(points) < minimum:
+        raise HTTPException(status_code=502, detail="CoinGecko returned insufficient historical data.")
+    return {"series": {"id": asset_id, "points": points}, "source": "coingecko"}
+
+
+async def search(query: str):
+    clean_query = query.strip()
+    if len(clean_query) < 2:
+        return {"coins": [], "source": "coingecko"}
+    data = await get_json("/search", {"query": clean_query}, 300)
+    coins = data.get("coins") if isinstance(data, dict) else None
+    if not isinstance(coins, list):
+        raise HTTPException(status_code=502, detail=LIVE_DATA_ERROR)
+    if any(not isinstance(coin, dict) or not all(isinstance(coin.get(field), str) and coin[field] for field in ('id', 'name', 'symbol')) for coin in coins[:12]):
+        raise HTTPException(status_code=502, detail=LIVE_DATA_ERROR)
+    return {"coins": coins[:12], "source": "coingecko"}
+
+
+async def usd_to_inr_rate():
+    response = await get_json('/exchange_rates', ttl=3600)
+    rates = response.get('rates') if isinstance(response, dict) else None
+    usd = rates.get('usd', {}).get('value') if isinstance(rates, dict) else None
+    inr = rates.get('inr', {}).get('value') if isinstance(rates, dict) else None
+    if not _valid_number(usd, positive=True) or not _valid_number(inr, positive=True):
+        raise HTTPException(status_code=502, detail=LIVE_DATA_ERROR)
+    return {'usdToInr': inr / usd, 'source': 'coingecko'}
+
+
+async def coin_details(asset_id: str):
+    if not re.fullmatch(r"[a-z0-9-]+", asset_id):
+        raise HTTPException(status_code=400, detail="Invalid coin ID.")
+    safe_id = quote(asset_id, safe="-")
+    details = await get_json(
+        f"/coins/{safe_id}",
+        {"localization": "false", "tickers": "false", "market_data": "true", "community_data": "false", "developer_data": "false", "sparkline": "false"},
+        180,
+    )
+    market_data = details.get("market_data") if isinstance(details, dict) else None
+    current_price = market_data.get("current_price", {}).get("usd") if isinstance(market_data, dict) else None
+    if not isinstance(details, dict) or not details.get("id") or not details.get("name") or not details.get("symbol") or not _valid_number(current_price, positive=True):
+        raise HTTPException(status_code=502, detail=LIVE_DATA_ERROR)
+    historical = await history(asset_id, 30)
+    return {"details": details, "history": historical["series"]["points"], "source": "coingecko"}

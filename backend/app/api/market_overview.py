@@ -1,24 +1,81 @@
-import asyncio
-from datetime import datetime,timezone
-from fastapi import APIRouter
-from ..services.coingecko import get_json
-from ..assets import SUPPORTED
-router=APIRouter()
-@router.get('/api/market/overview',description='Market overview, leading movers, trending assets and Fear & Greed.')
+import logging
+import math
+from datetime import datetime, timezone
+
+from fastapi import APIRouter, HTTPException
+
+from ..services.coingecko import get_json, LIVE_DATA_ERROR
+
+logger = logging.getLogger(__name__)
+router = APIRouter()
+
+
+@router.get('/api/market/overview', description='Market overview, market movers, and trending assets from CoinGecko.')
 async def overview():
-    fallback=[{'id':a['id'],'symbol':a['symbol'].lower(),'name':a['name'],'current_price':[64000,3400,145,590,.54,.42,.12,14.5][i],'market_cap':[1.25e12,420e9,68e9,91e9,31e9,15e9,18e9,8.5e9][i],'market_cap_rank':a['marketCapRank'],'total_volume':[28e9,16e9,3e9,1.2e9,1.1e9,430e6,900e6,520e6][i],'price_change_percentage_24h':[1.8,.9,6.4,-.6,2.1,-1.2,4.8,3.3][i],'price_change_percentage_7d_in_currency':[4.2,2.5,11.1,-1.8,3.2,-2.2,9.1,6.4][i],'price_change_percentage_30d_in_currency':[12.6,8.2,20.5,4.2,7.4,-5.1,16.8,10.9][i]} for i,a in enumerate(SUPPORTED)]
-    source='coingecko'
-    try:markets=await get_json('/coins/markets',{'vs_currency':'usd','order':'market_cap_desc','per_page':100,'page':1,'sparkline':'false','price_change_percentage':'24h,7d,30d'})
-    except Exception:markets=fallback;source='synthetic-fallback'
-    changes=[x for x in markets if isinstance(x.get('price_change_percentage_24h'),(int,float))];gainers=sorted(changes,key=lambda x:x.get('price_change_percentage_24h',0),reverse=True)[:8];losers=sorted(changes,key=lambda x:x.get('price_change_percentage_24h',0))[:8]
-    try:trending=[x['item'] for x in (await get_json('/search/trending',ttl=300)).get('coins',[])][:8]
-    except Exception:trending=[{'id':x['id'],'name':x['name'],'symbol':x['symbol'],'market_cap_rank':x.get('market_cap_rank'),'score':i} for i,x in enumerate(fallback[:6])]
-    total=sum(x.get('market_cap') or 0 for x in markets);btc=next((x.get('market_cap') or 0 for x in markets if x['id']=='bitcoin'),0);global_data={'activeCryptocurrencies':len(markets),'totalMarketCapUsd':total,'totalVolumeUsd':sum(x.get('total_volume') or 0 for x in markets),'btcDominance':btc/max(total,1)*100}
+    markets = await get_json('/coins/markets', {
+        'vs_currency': 'usd',
+        'order': 'market_cap_desc',
+        'per_page': 100,
+        'page': 1,
+        'sparkline': 'false',
+        'price_change_percentage': '24h,7d,30d',
+    }, 90)
+    if not isinstance(markets, list) or not markets:
+        raise HTTPException(status_code=502, detail=LIVE_DATA_ERROR)
+    for coin in markets:
+        if (not isinstance(coin, dict) or not coin.get('id') or not coin.get('name')
+                or not coin.get('symbol') or not isinstance(coin.get('current_price'), (int, float))
+                or isinstance(coin.get('current_price'), bool) or not math.isfinite(coin['current_price'])
+                or coin['current_price'] <= 0):
+            raise HTTPException(status_code=502, detail=LIVE_DATA_ERROR)
+
+    changes = [coin for coin in markets if isinstance(coin.get('price_change_percentage_24h'), (int, float))]
+    gainers = sorted(changes, key=lambda coin: coin['price_change_percentage_24h'], reverse=True)[:8]
+    losers = sorted(changes, key=lambda coin: coin['price_change_percentage_24h'])[:8]
+    warnings = []
+
     try:
-        g=(await get_json('/global',ttl=300))['data'];global_data={'activeCryptocurrencies':g['active_cryptocurrencies'],'totalMarketCapUsd':g['total_market_cap']['usd'],'totalVolumeUsd':g['total_volume']['usd'],'btcDominance':g['market_cap_percentage']['btc']}
-    except Exception:pass
-    fg={'value':52,'classification':'Neutral','source':'fallback'}
+        trending_response = await get_json('/search/trending', ttl=300)
+        trending = [item['item'] for item in trending_response.get('coins', []) if isinstance(item, dict) and isinstance(item.get('item'), dict)][:8]
+    except HTTPException:
+        logger.warning('CoinGecko trending endpoint unavailable')
+        trending = []
+        warnings.append('Trending coins are temporarily unavailable.')
+
     try:
-        f=(await get_json('https://api.alternative.me/fng/',{'limit':1},3600,True))['data'][0];fg={'value':int(f['value']),'classification':f['value_classification'],'source':'alternative.me'}
-    except Exception:pass
-    return {'generatedAt':datetime.now(timezone.utc).isoformat(),'source':source,'global':global_data,'fearGreed':fg,'markets':markets[:30],'topGainers':gainers,'topLosers':losers,'trending':trending}
+        response = await get_json('/global', ttl=300)
+        global_data = response['data']
+        totals = global_data['total_market_cap']
+        volumes = global_data['total_volume']
+        dominance = global_data['market_cap_percentage']
+        values = (totals['usd'], volumes['usd'], dominance['btc'], global_data['active_cryptocurrencies'])
+        if not all(isinstance(value, (int, float)) and math.isfinite(value) for value in values):
+            raise ValueError('Invalid global market values')
+        global_summary = {
+            'activeCryptocurrencies': int(values[3]),
+            'totalMarketCapUsd': float(values[0]),
+            'totalVolumeUsd': float(values[1]),
+            'btcDominance': float(values[2]),
+        }
+    except (HTTPException, KeyError, TypeError, ValueError):
+        logger.warning('CoinGecko global endpoint unavailable or malformed')
+        global_summary = {
+            'activeCryptocurrencies': None,
+            'totalMarketCapUsd': None,
+            'totalVolumeUsd': None,
+            'btcDominance': None,
+        }
+        warnings.append('Global market statistics are temporarily unavailable.')
+
+    return {
+        'generatedAt': datetime.now(timezone.utc).isoformat(),
+        'source': 'coingecko',
+        'global': global_summary,
+        # Fear & Greed is not CoinGecko data; do not invent a value or mix providers.
+        'fearGreed': None,
+        'markets': markets[:30],
+        'topGainers': gainers,
+        'topLosers': losers,
+        'trending': trending,
+        'warnings': warnings,
+    }

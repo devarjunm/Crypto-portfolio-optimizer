@@ -4,6 +4,10 @@ const nextConfig = {
   reactStrictMode: true,
   typedRoutes: true,
   turbopack: { root: process.cwd() },
+  async rewrites() {
+    const apiOrigin = process.env.API_PROXY_TARGET?.trim().replace(/\/+$/, '');
+    return apiOrigin ? [{ source: '/api/:path*', destination: `${apiOrigin}/api/:path*` }] : [];
+  },
   async headers() {
     return [
       {

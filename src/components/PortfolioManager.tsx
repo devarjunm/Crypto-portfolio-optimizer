@@ -1,6 +1,6 @@
 'use client';
 
-import { FormEvent, useEffect, useMemo, useState } from 'react';
+import { FormEvent, useCallback, useEffect, useState } from 'react';
 import { supportedAssets } from '@/lib/assets';
 import { formatCurrency, type CurrencyCode } from '@/lib/currency';
 import { apiFetch } from '@/lib/api';
@@ -67,6 +67,7 @@ const COLORS = ['#22d3ee', '#a78bfa', '#4ade80', '#fbbf24', '#fb7185', '#60a5fa'
 
 export default function PortfolioManager({ user, currency, onAuthRequest }: { user: AuthUser | null; currency: CurrencyCode; onAuthRequest: (mode: 'login' | 'signup') => void }) {
   const [snapshot, setSnapshot] = useState<PortfolioSnapshot | null>(null);
+  const [snapshotOwnerId, setSnapshotOwnerId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -74,31 +75,38 @@ export default function PortfolioManager({ user, currency, onAuthRequest }: { us
   const [editingAssetId, setEditingAssetId] = useState<string | null>(null);
   const [holdingForm, setHoldingForm] = useState({ assetId: 'bitcoin', quantity: '', averageBuyPrice: '' });
   const [transactionForm, setTransactionForm] = useState({ assetId: 'bitcoin', type: 'buy', quantity: '', price: '', fee: '0', date: new Date().toISOString().slice(0, 10), notes: '' });
-  const [csv, setCsv] = useState('assetId,quantity,averageBuyPrice\nbitcoin,0.10,60000\nethereum,1.50,3200');
+  const [csv, setCsv] = useState('assetId,quantity,averageBuyPrice\n');
 
-  useEffect(() => {
-    if (!user) {
-      setSnapshot(null);
-      return;
-    }
-    void refreshPortfolio();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+  const currentSnapshot = user?.id === snapshotOwnerId ? snapshot : null;
+
+  const updateSnapshot = useCallback((value: PortfolioSnapshot) => {
+    setSnapshot(value);
+    setSnapshotOwnerId(user?.id ?? null);
   }, [user?.id]);
 
-  async function refreshPortfolio() {
+  const refreshPortfolio = useCallback(async () => {
     setLoading(true);
     setError('');
     try {
       const response = await apiFetch('/api/portfolio');
       const data = await response.json();
       if (!response.ok) throw new Error(data.error ?? 'Unable to load portfolio.');
-      setSnapshot(data as PortfolioSnapshot);
+      updateSnapshot(data as PortfolioSnapshot);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Unable to load portfolio.');
     } finally {
       setLoading(false);
     }
-  }
+  }, [updateSnapshot]);
+
+  useEffect(() => {
+    if (!user) return;
+    let active = true;
+    queueMicrotask(() => {
+      if (active) void refreshPortfolio();
+    });
+    return () => { active = false; };
+  }, [user, refreshPortfolio]);
 
   async function submitHolding(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -114,7 +122,7 @@ export default function PortfolioManager({ user, currency, onAuthRequest }: { us
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error ?? 'Unable to save holding.');
-      setSnapshot(data as PortfolioSnapshot);
+      updateSnapshot(data as PortfolioSnapshot);
       setNotice(editingAssetId ? 'Holding updated.' : 'Holding added.');
       setEditingAssetId(null);
       setHoldingForm({ assetId: 'bitcoin', quantity: '', averageBuyPrice: '' });
@@ -134,7 +142,7 @@ export default function PortfolioManager({ user, currency, onAuthRequest }: { us
       const response = await apiFetch(`/api/portfolio/holdings/${assetId}`, { method: 'DELETE' });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error ?? 'Unable to delete holding.');
-      setSnapshot(data as PortfolioSnapshot);
+      updateSnapshot(data as PortfolioSnapshot);
       setNotice('Holding deleted.');
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Unable to delete holding.');
@@ -156,7 +164,7 @@ export default function PortfolioManager({ user, currency, onAuthRequest }: { us
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error ?? 'Unable to add transaction.');
-      setSnapshot(data as PortfolioSnapshot);
+      updateSnapshot(data as PortfolioSnapshot);
       setNotice(`${transactionForm.type === 'buy' ? 'Buy' : 'Sell'} transaction added.`);
       setTransactionForm((current) => ({ ...current, quantity: '', price: '', fee: '0', notes: '' }));
     } catch (caught) {
@@ -179,7 +187,7 @@ export default function PortfolioManager({ user, currency, onAuthRequest }: { us
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error ?? 'Unable to import CSV.');
-      setSnapshot(data as PortfolioSnapshot);
+      updateSnapshot(data as PortfolioSnapshot);
       setNotice(`Imported ${data.importResult?.imported ?? 0} holdings from CSV.`);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Unable to import CSV.');
@@ -197,8 +205,6 @@ export default function PortfolioManager({ user, currency, onAuthRequest }: { us
     });
   }
 
-  const simpleGrowthPoints = useMemo(() => createGrowthEstimate(snapshot), [snapshot]);
-
   return (
     <section className="shell portfolio-section" id="portfolio" aria-labelledby="portfolio-title">
       <div className="section-title">
@@ -206,7 +212,7 @@ export default function PortfolioManager({ user, currency, onAuthRequest }: { us
           <h2 id="portfolio-title">Portfolio management</h2>
           <p>Add/edit/delete holdings, record buy/sell transactions, import CSV data, and track value, profit/loss, gains, allocation, and AI risk insights.</p>
         </div>
-        {snapshot && <span className="pill">Portfolio data: {snapshot.source}</span>}
+        {currentSnapshot && <span className="pill">Portfolio data: {currentSnapshot.source}</span>}
       </div>
 
       {!user && (
@@ -227,7 +233,7 @@ export default function PortfolioManager({ user, currency, onAuthRequest }: { us
           {error && <div className="notice error" role="alert">{error}</div>}
           {notice && <div className="notice" role="status">{notice}</div>}
 
-          {snapshot && <SummaryCards snapshot={snapshot} currency={currency} />}
+          {currentSnapshot && <SummaryCards snapshot={currentSnapshot} currency={currency} />}
 
           <div className="portfolio-grid">
             <form className="panel portfolio-form" onSubmit={submitHolding}>
@@ -287,15 +293,15 @@ export default function PortfolioManager({ user, currency, onAuthRequest }: { us
             </form>
           </div>
 
-          {snapshot && (
+          {currentSnapshot && (
             <>
               <div className="portfolio-analytics-grid">
-                <AllocationPie snapshot={snapshot} />
-                <RiskPanel snapshot={snapshot} />
-                <GrowthChart points={simpleGrowthPoints} currency={currency} />
+                <AllocationPie snapshot={currentSnapshot} />
+                <RiskPanel snapshot={currentSnapshot} />
+                <GrowthChart />
               </div>
-              <HoldingsTable holdings={snapshot.holdings} currency={currency} onEdit={startEdit} onDelete={deleteHolding} />
-              <TransactionsTable transactions={snapshot.transactions} currency={currency} />
+              <HoldingsTable holdings={currentSnapshot.holdings} currency={currency} onEdit={startEdit} onDelete={deleteHolding} />
+              <TransactionsTable transactions={currentSnapshot.transactions} currency={currency} />
             </>
           )}
         </>
@@ -326,7 +332,6 @@ function SummaryCard({ label, value, detail, tone }: { label: string; value: str
 
 function AllocationPie({ snapshot }: { snapshot: PortfolioSnapshot }) {
   const segments = snapshot.analytics.allocation;
-  let cumulative = 0;
   return (
     <article className="panel analytics-card">
       <h3>Asset allocation</h3>
@@ -335,8 +340,8 @@ function AllocationPie({ snapshot }: { snapshot: PortfolioSnapshot }) {
         {segments.map((segment, index) => {
           const dash = segment.weight * 452.39;
           const gap = 452.39 - dash;
-          const offset = -cumulative * 452.39;
-          cumulative += segment.weight;
+          const cumulativeWeight = segments.slice(0, index).reduce((total, item) => total + item.weight, 0);
+          const offset = -cumulativeWeight * 452.39;
           return <circle key={segment.assetId} cx="110" cy="110" r="72" fill="none" stroke={COLORS[index % COLORS.length]} strokeWidth="42" strokeDasharray={`${dash} ${gap}`} strokeDashoffset={offset} transform="rotate(-90 110 110)" />;
         })}
         <text x="110" y="104" textAnchor="middle" fill="#f7f9ff" fontSize="20" fontWeight="900">{segments.length}</text>
@@ -371,25 +376,11 @@ function RiskPanel({ snapshot }: { snapshot: PortfolioSnapshot }) {
   );
 }
 
-function GrowthChart({ points, currency }: { points: Array<{ label: string; value: number }>; currency: CurrencyCode }) {
-  if (!points.length) return <article className="panel analytics-card"><h3>Portfolio growth</h3><p className="help">Add holdings to see estimated growth.</p></article>;
-  const width = 420;
-  const height = 260;
-  const padding = 28;
-  const min = Math.min(...points.map((point) => point.value));
-  const max = Math.max(...points.map((point) => point.value));
-  const x = (index: number) => padding + (index / Math.max(points.length - 1, 1)) * (width - padding * 2);
-  const y = (value: number) => height - padding - ((value - min) / Math.max(max - min, 0.000001)) * (height - padding * 2);
-  const path = points.map((point, index) => `${index === 0 ? 'M' : 'L'} ${x(index).toFixed(1)} ${y(point.value).toFixed(1)}`).join(' ');
+function GrowthChart() {
   return (
     <article className="panel analytics-card">
-      <h3>Estimated portfolio growth</h3>
-      <svg className="growth-chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Estimated portfolio growth line chart">
-        <path d={path} fill="none" stroke="#22d3ee" strokeWidth="4" strokeLinecap="round" />
-        <text x={padding} y="22" fill="#9eaccb" fontSize="12">Cost {formatCurrency(points[0].value, currency, true)}</text>
-        <text x={width - padding} y="22" textAnchor="end" fill="#9eaccb" fontSize="12">Now {formatCurrency(points.at(-1)?.value ?? 0, currency, true)}</text>
-      </svg>
-      <p className="help">This chart estimates growth from cost basis to current value. Full historical valuation is planned next.</p>
+      <h3>Portfolio history</h3>
+      <p className="help">Historical portfolio valuation is not available yet. Current value and gains use live CoinGecko prices.</p>
     </article>
   );
 }
@@ -446,17 +437,6 @@ function TransactionsTable({ transactions, currency }: { transactions: StoredTra
       </div>
     </div>
   );
-}
-
-function createGrowthEstimate(snapshot: PortfolioSnapshot | null) {
-  if (!snapshot || snapshot.summary.totalCostBasis <= 0) return [];
-  const start = snapshot.summary.totalCostBasis;
-  const end = snapshot.summary.totalValue;
-  return Array.from({ length: 12 }, (_, index) => {
-    const t = index / 11;
-    const wave = Math.sin(index * 1.4) * Math.abs(end - start) * 0.045;
-    return { label: `P${index + 1}`, value: start + (end - start) * t + wave };
-  });
 }
 
 function formatPct(value: number) {

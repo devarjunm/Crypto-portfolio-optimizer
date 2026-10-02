@@ -1,16 +1,16 @@
 import asyncio,re,html,base64
 from datetime import datetime,timezone
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 import httpx
 from ..services.sentiment import analyze
 router=APIRouter();FEEDS=[('CoinDesk','https://www.coindesk.com/arc/outboundfeeds/rss/'),('Cointelegraph','https://cointelegraph.com/rss'),('Decrypt','https://decrypt.co/feed')]
-FALLBACK=[('Bitcoin traders watch liquidity as market attempts recovery','Analysts say Bitcoin remains volatile but institutional inflows and improving liquidity are supporting a cautious recovery.','https://www.coindesk.com/','CoinDesk'),('Ethereum upgrade narrative stays positive as staking demand grows','Ethereum sentiment is supported by staking growth, adoption, and developer activity, although macro risk remains.','https://cointelegraph.com/','Cointelegraph'),('Altcoins face selloff after liquidation spike','Several smaller tokens declined as leverage reset and traders reduced risk exposure.','https://decrypt.co/','Decrypt')]
 def parse(xml,source):
     out=[]
     for block in re.findall(r'<item[\s\S]*?</item>',xml,re.I)[:12]:
         def ext(tag):
             m=re.search(r'<'+re.escape(tag)+r'[^>]*>([\s\S]*?)</'+re.escape(tag)+r'>',block,re.I);return (m.group(1) if m else '').removeprefix('<![CDATA[').removesuffix(']]>').strip()
-        title=html.unescape(ext('title') or 'Untitled crypto news');desc=re.sub('<[^>]*>',' ',html.unescape(ext('description') or ext('content:encoded')));url=html.unescape(ext('link') or '#')
+        title=html.unescape(ext('title'));desc=re.sub('<[^>]*>',' ',html.unescape(ext('description') or ext('content:encoded')));url=html.unescape(ext('link'))
+        if not title or not url.startswith(('https://','http://')):continue
         try:published=datetime.strptime(ext('pubDate'),'%a, %d %b %Y %H:%M:%S %z').astimezone(timezone.utc).isoformat()
         except Exception:published=datetime.now(timezone.utc).isoformat()
         out.append({'title':title,'description':' '.join(desc.split())[:260],'url':url,'source':source,'publishedAt':published})
@@ -25,7 +25,8 @@ async def news(q:str=''):
         raw=[i for r in rs if not isinstance(r,Exception) for i in r][:30]
         if not raw:raise ValueError()
         source='rss'
-    except Exception:raw=[{'title':t,'description':d,'url':u,'source':s,'publishedAt':datetime.now(timezone.utc).isoformat()} for t,d,u,s in FALLBACK];source='fallback'
+    except Exception as exc:raise HTTPException(503,'Live crypto news is temporarily unavailable. Please try again.') from exc
+    if not raw:raise HTTPException(503,'Live crypto news is temporarily unavailable. Please try again.')
     mapping=[('bitcoin','BTC'),('btc','BTC'),('ethereum','ETH'),('ether','ETH'),('eth','ETH'),('solana','SOL'),('xrp','XRP'),('ripple','XRP'),('cardano','ADA'),('dogecoin','DOGE'),('chainlink','LINK'),('bnb','BNB')];items=[]
     for ix,item in enumerate(raw):
         text=item['title']+' '+item['description'];lower=text.lower();tags=list(dict.fromkeys(tag for word,tag in mapping if word in lower));item.update(id=f"{item['source']}-{ix}-{base64.urlsafe_b64encode(item['title'].encode()).decode()[:12]}",coinTags=tags,sentiment=analyze(item['title']+'. '+item['description']))

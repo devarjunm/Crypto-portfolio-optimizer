@@ -1,23 +1,15 @@
 'use client';
 
-import { FormEvent, useEffect, useMemo, useState } from 'react';
-import { supportedAssets } from '@/lib/assets';
+import { FormEvent, startTransition, useEffect, useMemo, useState } from 'react';
 import MarketDashboard from '@/components/MarketDashboard';
 import PortfolioManager from '@/components/PortfolioManager';
 import NewsSentiment from '@/components/NewsSentiment';
 import WatchlistAlerts from '@/components/WatchlistAlerts';
-import { currencyLabel, formatCurrency, type CurrencyCode, USD_TO_INR } from '@/lib/currency';
+import { currencyLabel, formatCurrency, setUsdToInrRate, type CurrencyCode } from '@/lib/currency';
 import type { Allocation, FrontierPoint, MarketAsset, Objective, OptimizerResponse } from '@/types/portfolio';
 import { apiFetch, apiUrl } from '@/lib/api';
 
 const INITIAL_SELECTED = ['bitcoin', 'ethereum', 'solana', 'binancecoin', 'ripple'];
-const INITIAL_HOLDINGS: Record<string, string> = {
-  bitcoin: '5000',
-  ethereum: '3500',
-  solana: '1800',
-  binancecoin: '1200',
-  ripple: '750'
-};
 const COLORS = ['#22d3ee', '#a78bfa', '#4ade80', '#fbbf24', '#fb7185', '#60a5fa', '#f472b6', '#34d399'];
 
 interface AuthUser {
@@ -28,9 +20,9 @@ interface AuthUser {
 }
 
 export default function Home() {
-  const [markets, setMarkets] = useState<MarketAsset[]>(supportedAssets);
+  const [markets, setMarkets] = useState<MarketAsset[]>([]);
   const [selected, setSelected] = useState<string[]>(INITIAL_SELECTED);
-  const [holdings, setHoldings] = useState<Record<string, string>>(INITIAL_HOLDINGS);
+  const [holdings, setHoldings] = useState<Record<string, string>>({});
   const [objective, setObjective] = useState<Objective>('max_sharpe');
   const [days, setDays] = useState(365);
   const [samples, setSamples] = useState(8000);
@@ -42,6 +34,8 @@ export default function Home() {
   const [error, setError] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [marketSource, setMarketSource] = useState('loading');
+  const [marketError, setMarketError] = useState('');
+  const [usdToInrRate, setUsdToInrRateState] = useState<number | null>(null);
   const [currency, setCurrency] = useState<CurrencyCode>('USD');
   const [user, setUser] = useState<AuthUser | null>(null);
   const [authMode, setAuthMode] = useState<'login' | 'signup' | null>(null);
@@ -52,20 +46,50 @@ export default function Home() {
   useEffect(() => {
     let isMounted = true;
     apiFetch('/api/markets')
-      .then((response) => response.json())
+      .then(async (response) => {
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error ?? 'Live market data is temporarily unavailable. Please try again.');
+        return data;
+      })
       .then((data: { assets?: MarketAsset[]; source?: string }) => {
         if (!isMounted) return;
-        if (data.assets?.length) setMarkets(data.assets);
-        setMarketSource(data.source ?? 'coingecko');
+        if (!data.assets?.length || data.source !== 'coingecko') throw new Error('The API did not return verified CoinGecko market data.');
+        setMarkets(data.assets);
+        setMarketSource('CoinGecko');
+        setMarketError('');
       })
-      .catch(() => {
+      .catch((caught) => {
         if (!isMounted) return;
-        setMarketSource('offline demo');
+        setMarkets([]);
+        setMarketSource('unavailable');
+        setMarketError(caught instanceof Error ? caught.message : 'Live market data is temporarily unavailable. Please try again.');
       });
 
     return () => {
       isMounted = false;
     };
+  }, []);
+
+  useEffect(() => {
+    let isMounted = true;
+    apiFetch('/api/market/fx')
+      .then(async (response) => {
+        const data = await response.json();
+        if (!response.ok || data.source !== 'coingecko' || typeof data.usdToInr !== 'number') throw new Error('Live currency conversion is unavailable.');
+        return data.usdToInr as number;
+      })
+      .then((rate) => {
+        if (!isMounted) return;
+        setUsdToInrRate(rate);
+        setUsdToInrRateState(rate);
+      })
+      .catch(() => {
+        if (isMounted) {
+          setUsdToInrRate(null);
+          setUsdToInrRateState(null);
+        }
+      });
+    return () => { isMounted = false; };
   }, []);
 
   useEffect(() => {
@@ -86,15 +110,21 @@ export default function Home() {
 
   useEffect(() => {
     const savedCurrency = window.localStorage.getItem('displayCurrency');
-    if (savedCurrency === 'USD' || savedCurrency === 'INR') setCurrency(savedCurrency);
+    if (savedCurrency === 'USD' || savedCurrency === 'INR') {
+      // Hydrate a browser preference after mount; this cannot be read during server rendering.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setCurrency(savedCurrency);
+    }
   }, []);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const googleError = params.get('authError');
     if (googleError) {
-      setAuthError(googleError);
-      setAuthMode('login');
+      startTransition(() => {
+        setAuthError(googleError);
+        setAuthMode('login');
+      });
       window.history.replaceState({}, '', window.location.pathname);
     }
   }, []);
@@ -103,11 +133,6 @@ export default function Home() {
     setCurrency(value);
     window.localStorage.setItem('displayCurrency', value);
   }
-
-  const selectedMarkets = useMemo(
-    () => markets.filter((asset) => selected.includes(asset.id)),
-    [markets, selected]
-  );
 
   const totalHoldingValue = useMemo(
     () => selected.reduce((total, id) => total + toNumber(holdings[id]), 0),
@@ -274,7 +299,7 @@ export default function Home() {
               <h2 id="optimizer-title">Portfolio optimizer</h2>
               <p>
                 Select crypto assets, enter current holding values, choose risk controls, then generate an optimized allocation.
-                Display currency: {currencyLabel(currency)}. INR values use an estimated rate of $1 ≈ ₹{USD_TO_INR}.
+                Display currency: {currencyLabel(currency)}.{currency === 'INR' ? ` Live CoinGecko rate: ${usdToInrRate ? `₹${usdToInrRate.toFixed(2)} per $1` : 'unavailable'}.` : ''}
               </p>
             </div>
             <span className="pill">Total holdings: {formatCurrency(totalHoldingValue, currency)}</span>
@@ -284,7 +309,8 @@ export default function Home() {
             <form className="panel controls" onSubmit={handleSubmit}>
               <fieldset className="fieldset">
                 <legend>Assets and holdings</legend>
-                <p className="help">Values are USD notional amounts. Leave a selected asset at 0 if you want a fresh target allocation.</p>
+                <p className="help">Values are USD notional amounts. Enter your own amounts; no sample holdings are prefilled.</p>
+                {marketError && <div className="notice error" role="alert">{marketError}</div>}
                 {markets.map((asset) => {
                   const checked = selected.includes(asset.id);
                   return (
@@ -380,14 +406,14 @@ export default function Home() {
 
               {!user && (
                 <div className="notice">
-                  Create an account or log in to personalize the dashboard. Optimization still works in demo mode.
+                  Create an account or log in to save a portfolio. Optimization uses live market history.
                 </div>
               )}
 
-              <button className="button full-width" type="submit" disabled={isLoading}>
+              <button className="button full-width" type="submit" disabled={isLoading || Boolean(marketError) || markets.length < 2}>
                 {isLoading ? 'Optimizing…' : 'Generate optimized allocation'}
               </button>
-              <p className="help">Not financial advice. Crypto assets are volatile and optimization is based on historical data.</p>
+              <p className="help">Not financial advice. Crypto assets are volatile; results require current CoinGecko prices and history.</p>
             </form>
 
             <section className="panel results" aria-live="polite" aria-busy={isLoading}>
@@ -414,7 +440,7 @@ export default function Home() {
           <div className="feature-grid">
             <article className="panel feature">
               <h3>Live data API layer</h3>
-              <p>The FastAPI backend fetches CoinGecko markets and historical charts with caching and synthetic fallback for local development.</p>
+              <p>The FastAPI backend fetches CoinGecko market data and history. If live data is unavailable, the app displays an error instead of invented prices.</p>
             </article>
             <article className="panel feature">
               <h3>MPT engine</h3>

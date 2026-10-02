@@ -62,7 +62,7 @@ This project can grow into the complete crypto portfolio platform described in t
 - Market cap
 - Trading volume
 - BTC dominance
-- Fear & Greed Index
+- Market global statistics from CoinGecko; Fear & Greed is omitted unless a live source is intentionally added.
 - Search for any coin
 - Coin details page
 - 30-day price chart

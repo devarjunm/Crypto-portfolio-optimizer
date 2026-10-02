@@ -1,12 +1,16 @@
-import json, os, tempfile, asyncio
+import json, os, tempfile, asyncio, logging
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[3]
-DATA=ROOT/'data'
+DATA=Path(os.getenv('DATA_DIR',str(ROOT/'data'))).expanduser().resolve()
 _locks={}
+logger=logging.getLogger(__name__)
 async def read(name,default):
     path=DATA/name
     try:return json.loads(await asyncio.to_thread(path.read_text,encoding='utf8'))
-    except (FileNotFoundError,json.JSONDecodeError):return default
+    except FileNotFoundError:return default
+    except json.JSONDecodeError as exc:
+        logger.error('Stored JSON file %s is malformed',name)
+        raise RuntimeError(f'Stored data file {name} is malformed; restore it before continuing.') from exc
 async def write(name,value):
     DATA.mkdir(parents=True,exist_ok=True); path=DATA/name; lock=_locks.setdefault(name,asyncio.Lock())
     async with lock:

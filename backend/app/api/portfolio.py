@@ -28,7 +28,9 @@ async def save(uid,p):
 async def snapshot(uid):
     p=await portfolio(uid);ids=[h['assetId'] for h in p['holdings']];data=await markets(ids) if ids else {'assets':[],'source':'coingecko'};market={a['id']:a for a in data['assets']};details=[]
     for h in p['holdings']:
-        a=market.get(h['assetId'],next(x for x in SUPPORTED if x['id']==h['assetId']));price=a.get('currentPrice') or h['averageBuyPrice'];value=h['quantity']*price;cost=h['quantity']*h['averageBuyPrice'];change=a.get('priceChange24h') or 0;prev=price/(1+change/100 or 1)
+        a=market.get(h['assetId'])
+        if not a or not isinstance(a.get('currentPrice'),(int,float)) or a['currentPrice']<=0:raise HTTPException(502,'Live market data is temporarily unavailable. Please try again.')
+        price=a['currentPrice'];value=h['quantity']*price;cost=h['quantity']*h['averageBuyPrice'];change=a.get('priceChange24h') or 0;prev=price/(1+change/100 or 1)
         details.append({**h,'symbol':a['symbol'],'name':a['name'],'currentPrice':price,'priceChange24h':change,'currentValue':value,'costBasis':cost,'unrealizedGain':value-cost,'unrealizedGainPct':(value-cost)/cost*100 if cost else 0,'dailyGain':h['quantity']*(price-prev),'allocationWeight':0})
     total=sum(h['currentValue'] for h in details)
     for h in details:h['allocationWeight']=h['currentValue']/total if total else 0

@@ -38,6 +38,7 @@ type WatchlistPayload = {
 
 export default function WatchlistAlerts({ user, currency, onAuthRequest }: { user: AuthUser | null; currency: CurrencyCode; onAuthRequest: (mode: 'login' | 'signup') => void }) {
   const [payload, setPayload] = useState<WatchlistPayload | null>(null);
+  const [payloadOwnerId, setPayloadOwnerId] = useState<string | null>(null);
   const [coinAssetId, setCoinAssetId] = useState('bitcoin');
   const [alertForm, setAlertForm] = useState({ assetId: 'bitcoin', direction: 'above', targetPrice: '' });
   const [loading, setLoading] = useState(false);
@@ -46,16 +47,19 @@ export default function WatchlistAlerts({ user, currency, onAuthRequest }: { use
   const [notice, setNotice] = useState('');
   const [browserEnabled, setBrowserEnabled] = useState(false);
 
+  const currentPayload = user?.id === payloadOwnerId ? payload : null;
+
   useEffect(() => {
-    if (!user) {
-      setPayload(null);
-      return;
-    }
-    void loadWatchlist();
+    if (user) void loadWatchlist();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.id]);
 
-  const triggeredAlerts = useMemo(() => payload?.alerts.filter((alert) => alert.triggered) ?? [], [payload]);
+  const triggeredAlerts = useMemo(() => currentPayload?.alerts.filter((alert) => alert.triggered) ?? [], [currentPayload]);
+
+  function updatePayload(value: WatchlistPayload) {
+    setPayload(value);
+    setPayloadOwnerId(user?.id ?? null);
+  }
 
   useEffect(() => {
     if (!browserEnabled || typeof window === 'undefined' || !('Notification' in window) || Notification.permission !== 'granted') return;
@@ -73,7 +77,7 @@ export default function WatchlistAlerts({ user, currency, onAuthRequest }: { use
       const response = await apiFetch('/api/watchlist');
       const data = await response.json();
       if (!response.ok) throw new Error(data.error ?? 'Unable to load watchlist.');
-      setPayload(data as WatchlistPayload);
+      updatePayload(data as WatchlistPayload);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Unable to load watchlist.');
     } finally {
@@ -94,7 +98,7 @@ export default function WatchlistAlerts({ user, currency, onAuthRequest }: { use
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error ?? 'Unable to add coin.');
-      setPayload(data as WatchlistPayload);
+      updatePayload(data as WatchlistPayload);
       setNotice('Coin added to watchlist.');
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Unable to add coin.');
@@ -111,7 +115,7 @@ export default function WatchlistAlerts({ user, currency, onAuthRequest }: { use
       const response = await apiFetch(`/api/watchlist?assetId=${encodeURIComponent(assetId)}`, { method: 'DELETE' });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error ?? 'Unable to remove coin.');
-      setPayload(data as WatchlistPayload);
+      updatePayload(data as WatchlistPayload);
       setNotice('Coin removed from watchlist.');
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Unable to remove coin.');
@@ -133,7 +137,7 @@ export default function WatchlistAlerts({ user, currency, onAuthRequest }: { use
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error ?? 'Unable to add alert.');
-      setPayload(data as WatchlistPayload);
+      updatePayload(data as WatchlistPayload);
       setNotice('Price alert added.');
       setAlertForm((current) => ({ ...current, targetPrice: '' }));
     } catch (caught) {
@@ -151,7 +155,7 @@ export default function WatchlistAlerts({ user, currency, onAuthRequest }: { use
       const response = await apiFetch(`/api/watchlist/alerts?alertId=${encodeURIComponent(alertId)}`, { method: 'DELETE' });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error ?? 'Unable to delete alert.');
-      setPayload(data as WatchlistPayload);
+      updatePayload(data as WatchlistPayload);
       setNotice('Alert deleted.');
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Unable to delete alert.');
@@ -177,7 +181,7 @@ export default function WatchlistAlerts({ user, currency, onAuthRequest }: { use
           <h2 id="watchlist-title">Watchlist & price alerts</h2>
           <p>Add favorite coins, track daily changes, set price alerts, and optionally trigger browser notifications.</p>
         </div>
-        {payload && <span className="pill">Alerts: {payload.alerts.length} · Source: {payload.source}</span>}
+        {currentPayload && <span className="pill">Alerts: {currentPayload.alerts.length} · Source: {currentPayload.source}</span>}
       </div>
 
       {!user && (
@@ -244,10 +248,10 @@ export default function WatchlistAlerts({ user, currency, onAuthRequest }: { use
             </div>
           </div>
 
-          {payload && (
+          {currentPayload && (
             <>
               <div className="watchlist-grid">
-                {payload.coins.length ? payload.coins.map((coin) => (
+                {currentPayload.coins.length ? currentPayload.coins.map((coin) => (
                   <article className="panel watch-coin" key={coin.id}>
                     <div>
                       <strong>{coin.symbol}</strong>
@@ -266,7 +270,7 @@ export default function WatchlistAlerts({ user, currency, onAuthRequest }: { use
                   <table>
                     <thead><tr><th>Coin</th><th>Condition</th><th>Current</th><th>Status</th><th>Created</th><th>Action</th></tr></thead>
                     <tbody>
-                      {payload.alerts.length ? payload.alerts.map((alert) => (
+                      {currentPayload.alerts.length ? currentPayload.alerts.map((alert) => (
                         <tr key={alert.id}>
                           <td><strong>{alert.symbol}</strong><br /><span className="help">{alert.name}</span></td>
                           <td>{alert.direction.toUpperCase()} {formatCurrency(alert.targetPrice, currency)}</td>
